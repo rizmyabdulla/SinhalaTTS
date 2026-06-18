@@ -1,0 +1,150 @@
+#!/bin/bash
+# =============================================================================
+# CosyVoice3 Sinhala SFT launcher (Kaggle T4-friendly)
+# =============================================================================
+#
+# Usage:
+#   bash train_sinhala_sft.sh llm                 # train the LLM only
+#   bash train_sinhala_sft.sh flow                # train the Flow only
+#   bash train_sinhala_sft.sh hifigan             # train the HiFi-GAN only
+#   bash train_sinhala_sft.sh all                 # LLM, then Flow, then HiFi-GAN
+#
+# What this does:
+#   1. Loads the Fun-CosyVoice3-0.5B-2512 pretrained weights.
+#   2. Runs torchrun with deepspeed stage 2 + bf16 (T4-safe).
+#   3. Writes checkpoints to <repo>/exp/cosyvoice3/<model>/.
+#   4. After all stages, averages the top-N checkpoints (more stable
+#      for natural-sounding output).
+#
+# Why we default to one GPU (not torch DDP multi-GPU) on Kaggle:
+#   Kaggle T4x2 has NVLink off, and the LLM's all-gather in DDP becomes
+#   the bottleneck. For a 0.5B model on a small corpus, single-GPU with
+#   grad accumulation is actually faster than 2x DDP.
+#
+# Adjust the env block below for your run.
+# =============================================================================
+
+set -euo pipefail
+
+# --- env --------------------------------------------------------------------
+REPO_ROOT=${REPO_ROOT:-"/kaggle/working/CosyVoice"}
+PRETRAINED_DIR=${PRETRAINED_DIR:-"/kaggle/working/pretrained_models/Fun-CosyVoice3-0.5B-2512"}
+DATA_DIR=${DATA_DIR:-"/kaggle/working/sinhala_data"}
+EXP_DIR=${EXP_DIR:-"${REPO_ROOT}/exp/cosyvoice3"}
+TB_DIR=${TB_DIR:-"${REPO_ROOT}/tensorboard/cosyvoice3"}
+CONFIG=${CONFIG:-"${REPO_ROOT}/examples/libritts/cosyvoice3/conf/cosyvoice3_sinhala_sft.yaml"}
+DS_CONFIG=${DS_CONFIG:-"${REPO_ROOT}/examples/libritts/cosyvoice3/conf/ds_stage2.json"}
+NUM_WORKERS=${NUM_WORKERS:-2}
+PREFETCH=${PREFETCH:-100}
+SAVE_EVERY=${SAVE_EVERY:-500}
+LOG_INTERVAL=${LOG_INTERVAL:-50}
+MAX_EPOCH=${MAX_EPOCH:-30}
+AVERAGE_NUM=${AVERAGE_NUM:-5}
+STAGE=${1:-llm}
+
+# Kaggle T4x2: only one GPU to avoid DDP bottleneck
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0"}
+NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | awk -F "," '{print NF}')
+
+cd "${REPO_ROOT}"
+
+# --- sanity checks ----------------------------------------------------------
+if [ ! -d "${PRETRAINED_DIR}" ]; then
+    echo "!! Pretrained dir not found: ${PRETRAINED_DIR}" >&2
+    echo "   Download with: huggingface-cli download FunAudioLLM/Fun-CosyVoice3-0.5B-2512 --local-dir ${PRETRAINED_DIR}" >&2
+    exit 1
+fi
+if [ ! -f "${DATA_DIR}/train/parquet/data.list" ] || [ ! -f "${DATA_DIR}/dev/parquet/data.list" ]; then
+    echo "!! Data not prepared. Run prepare_sinhala_data.py and build_parquet.py first." >&2
+    exit 1
+fi
+if [ ! -f "${PRETRAINED_DIR}/CosyVoice-BlankEN/config.json" ]; then
+    echo "!! Qwen2 base (CosyVoice-BlankEN) missing in pretrained dir" >&2
+    exit 1
+fi
+
+mkdir -p "${EXP_DIR}" "${TB_DIR}"
+
+# --- build train/dev data lists --------------------------------------------
+cat "${DATA_DIR}"/train/parquet/data.list > "${DATA_DIR}/train.data.list"
+cat "${DATA_DIR}"/dev/parquet/data.list > "${DATA_DIR}/dev.data.list"
+
+# --- launch -----------------------------------------------------------------
+train_engine=deepspeed
+job_id=$((RANDOM % 9999))
+dist_backend=nccl
+
+train_model() {
+    local model=$1
+    local ckpt="${PRETRAINED_DIR}/${model}.pt"
+    local model_dir="${EXP_DIR}/${model}/${train_engine}"
+    local tb_dir="${TB_DIR}/${model}/${train_engine}"
+    mkdir -p "${model_dir}" "${tb_dir}"
+    echo "=========================================================="
+    echo "  TRAINING MODEL: ${model}"
+    echo "  pretrained:     ${ckpt}"
+    echo "  output:         ${model_dir}"
+    echo "  tensorboard:    ${tb_dir}"
+    echo "=========================================================="
+
+    # The LLM uses Qwen2-BlankEN; flow/hift are pure DiT/HiFT.
+    torchrun --nnodes=1 --nproc_per_node=${NUM_GPUS} \
+        --rdzv_id=${job_id} --rdzv_backend="c10d" --rdzv_endpoint="localhost:1234" \
+        "${REPO_ROOT}/cosyvoice/bin/train.py" \
+        --train_engine "${train_engine}" \
+        --config "${CONFIG}" \
+        --train_data "${DATA_DIR}/train.data.list" \
+        --cv_data "${DATA_DIR}/dev.data.list" \
+        --qwen_pretrain_path "${PRETRAINED_DIR}/CosyVoice-BlankEN" \
+        --onnx_path "${PRETRAINED_DIR}" \
+        --model "${model}" \
+        --checkpoint "${ckpt}" \
+        --model_dir "${model_dir}" \
+        --tensorboard_dir "${tb_dir}" \
+        --ddp.dist_backend "${dist_backend}" \
+        --num_workers "${NUM_WORKERS}" \
+        --prefetch "${PREFETCH}" \
+        --pin_memory \
+        --use_amp \
+        --deepspeed_config "${DS_CONFIG}" \
+        --deepspeed.save_states "model+optimizer" \
+        --max_epoch "${MAX_EPOCH}" \
+        --log_interval "${LOG_INTERVAL}"
+}
+
+average_ckpt() {
+    local model=$1
+    local model_dir="${EXP_DIR}/${model}/${train_engine}"
+    local dst="${model_dir}/${model}.pt"
+    python "${REPO_ROOT}/cosyvoice/bin/average_model.py" \
+        --dst_model "${dst}" \
+        --src_path "${model_dir}" \
+        --num "${AVERAGE_NUM}" \
+        --val_best
+}
+
+case "${STAGE}" in
+    llm)
+        train_model llm
+        average_ckpt llm
+        ;;
+    flow)
+        train_model flow
+        average_ckpt flow
+        ;;
+    hifigan)
+        train_model hifigan
+        average_ckpt hifigan
+        ;;
+    all)
+        train_model llm;        average_ckpt llm
+        train_model flow;       average_ckpt flow
+        train_model hifigan;    average_ckpt hifigan
+        ;;
+    *)
+        echo "Unknown stage: ${STAGE}. Use llm | flow | hifigan | all." >&2
+        exit 2
+        ;;
+esac
+
+echo "Done. Next step: run inference_sinhala.py to test."
