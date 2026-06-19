@@ -3,9 +3,12 @@ CosyVoice3-0.5B Sinhala SFT — single-file Kaggle notebook
 ==========================================================
 
 This is the master script. Drop it into a single Kaggle code cell (or
-break it apart into multiple cells using the `# %% CELL N` markers
-and the "%run -i" idiom below). All other scripts in `scripts/` are
-helpers this notebook invokes; keep them in the working directory.
+break it apart into multiple cells using the `# %% CELL N` markers).
+
+Before running, copy the SinhalaTTS repo files into `/kaggle/working/`
+(Kaggle: Add Data -> Upload, or upload this notebook with the .py/.yaml/.sh
+files in the same project). OpenSLR30 audio is downloaded automatically in
+CELL 2 from openslr.org — no other Kaggle dataset is required.
 
 Pipeline overview
 -----------------
@@ -51,6 +54,56 @@ try:
     SCRIPT_ROOT = Path(__file__).resolve().parent
 except NameError:
     SCRIPT_ROOT = WORKDIR  # notebook cells have no __file__
+
+SCRIPTS_DIR = WORKDIR / "scripts"
+CONFIGS_DIR = WORKDIR / "configs"
+_REPO_SCRIPTS = (
+    "sinhala_normalize.py",
+    "prepare_sinhala_data.py",
+    "extract_features.py",
+    "build_parquet.py",
+    "export_sft_model.py",
+    "inference_sinhala.py",
+    "train_sinhala_sft.sh",
+)
+_REPO_CONFIGS = (
+    "cosyvoice3_sinhala_sft.yaml",
+    "ds_stage2.json",
+)
+
+
+def find_repo_file(name: str) -> Path | None:
+    """Find a SinhalaTTS repo file under WORKDIR or SCRIPT_ROOT."""
+    for root in dict.fromkeys((WORKDIR, SCRIPT_ROOT)):
+        path = root / name
+        if path.exists():
+            return path
+    return None
+
+
+def stage_repo_file(name: str, dest: Path) -> Path:
+    """Copy a repo file into dest if not already present."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        return dest
+    src = find_repo_file(name)
+    if src is None:
+        raise FileNotFoundError(
+            f"!! {name} not found under {WORKDIR}. "
+            "Copy the SinhalaTTS repo files into /kaggle/working/ "
+            "(same folder as this notebook)."
+        )
+    shutil.copy(src, dest)
+    return dest
+
+
+def ensure_repo_layout() -> None:
+    """Stage all SinhalaTTS helper scripts and configs under WORKDIR."""
+    for name in _REPO_SCRIPTS:
+        stage_repo_file(name, SCRIPTS_DIR / name)
+    for name in _REPO_CONFIGS:
+        stage_repo_file(name, CONFIGS_DIR / name)
+    os.chmod(SCRIPTS_DIR / "train_sinhala_sft.sh", 0o755)
 
 # Pin the exact stack CosyVoice3 was developed against. This is critical
 # because mismatched versions of conformer / matcha / pyworld will silently
@@ -191,34 +244,12 @@ print(f"[2]   {n_wavs} wavs under {SINHALA_SRC}")
 # guarantee consistent unicode encoding (NFC) before the Qwen2 tokenizer
 # sees them. See scripts/sinhala_normalize.py for the rules.
 
-# Lay out the helper scripts so they're importable
-SCRIPTS_DIR = WORKDIR / "scripts"
-SCRIPTS_DIR.mkdir(exist_ok=True)
-# (The user is expected to upload scripts/*.py here when running on Kaggle.
-#  For local execution, the repo's scripts/ dir works the same way.)
+# Lay out helper scripts (copied from /kaggle/working/ repo files)
+ensure_repo_layout()
+sys.path.insert(0, str(SCRIPTS_DIR))
 
 DATA_OUT = WORKDIR / "sinhala_data"
 DATA_OUT.mkdir(parents=True, exist_ok=True)
-
-# Copy our trained Sinhala normalizer + data prep into the working dir
-import importlib.util
-for src_name in ("sinhala_normalize.py", "prepare_sinhala_data.py"):
-    src_path = SCRIPTS_DIR / src_name
-    if not src_path.exists():
-        # try the local repo path
-        for candidate in [
-            WORKDIR / src_name,
-            WORKDIR / "sinhala_tts" / src_name,
-            Path("/kaggle/input/cosyvoice3-sinhala-scripts") / src_name,
-            SCRIPT_ROOT / src_name,
-        ]:
-            if candidate.exists():
-                shutil.copy(candidate, src_path)
-                break
-    if not src_path.exists():
-        print(f"[3] !! {src_name} not found. Upload it to /kaggle/working/scripts/")
-
-sys.path.insert(0, str(SCRIPTS_DIR))
 
 print("[3] running prepare_sinhala_data.py ...")
 subprocess.check_call([
@@ -243,18 +274,7 @@ print(f"[3]   train utts: {summary['train']['utts']}  dev utts: {summary['dev'][
 # the model; we run campplus for speaker embeddings (CPU) and
 # speech_tokenizer_v3 for the discrete LLM targets (GPU).
 
-# Copy feature extract script
-for src_name in ("extract_features.py",):
-    src_path = SCRIPTS_DIR / src_name
-    if not src_path.exists():
-        for candidate in [
-            WORKDIR / src_name,
-            Path("/kaggle/input/cosyvoice3-sinhala-scripts") / src_name,
-            SCRIPT_ROOT / src_name,
-        ]:
-            if candidate.exists():
-                shutil.copy(candidate, src_path)
-                break
+ensure_repo_layout()
 
 CAMPPLUS = PRETRAIN_DIR / "campplus.onnx"
 SPEECH_TOK = PRETRAIN_DIR / "speech_tokenizer_v3.onnx"
@@ -279,17 +299,7 @@ for split in ("train", "dev"):
 # =============================================================================
 # CELL 5 — Build parquet shards
 # =============================================================================
-for src_name in ("build_parquet.py",):
-    src_path = SCRIPTS_DIR / src_name
-    if not src_path.exists():
-        for candidate in [
-            WORKDIR / src_name,
-            Path("/kaggle/input/cosyvoice3-sinhala-scripts") / src_name,
-            SCRIPT_ROOT / src_name,
-        ]:
-            if candidate.exists():
-                shutil.copy(candidate, src_path)
-                break
+ensure_repo_layout()
 
 for split in ("train", "dev"):
     out_dir = DATA_OUT / split
@@ -356,39 +366,15 @@ print("[6]   ok!")
 #
 # Expected time on T4: ~4-5 hours for 30 epochs over ~1.5k utts.
 
-# Copy configs
-for src_name in ("cosyvoice3_sinhala_sft.yaml", "ds_stage2.json"):
-    src_path = WORKDIR / "configs" / src_name
-    if not src_path.exists():
-        for candidate in [
-            WORKDIR / src_name,
-            Path("/kaggle/input/cosyvoice3-sinhala-configs") / src_name,
-            SCRIPT_ROOT / src_name,
-        ]:
-            if candidate.exists():
-                src_path.parent.mkdir(exist_ok=True)
-                shutil.copy(candidate, src_path)
-                break
+ensure_repo_layout()
 
-# Make the config + ds files visible at the path the launcher expects
 TARGET_CONFIG = WORKDIR / "CosyVoice" / "examples" / "libritts" / "cosyvoice3" / "conf" / "cosyvoice3_sinhala_sft.yaml"
 TARGET_DS = WORKDIR / "CosyVoice" / "examples" / "libritts" / "cosyvoice3" / "conf" / "ds_stage2.json"
 TARGET_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-shutil.copy(WORKDIR / "configs" / "cosyvoice3_sinhala_sft.yaml", TARGET_CONFIG)
-shutil.copy(WORKDIR / "configs" / "ds_stage2.json", TARGET_DS)
+shutil.copy(CONFIGS_DIR / "cosyvoice3_sinhala_sft.yaml", TARGET_CONFIG)
+shutil.copy(CONFIGS_DIR / "ds_stage2.json", TARGET_DS)
 
-# Also drop the launcher script
 launcher_src = SCRIPTS_DIR / "train_sinhala_sft.sh"
-if not launcher_src.exists():
-    for candidate in [
-        WORKDIR / "train_sinhala_sft.sh",
-        Path("/kaggle/input/cosyvoice3-sinhala-scripts") / "train_sinhala_sft.sh",
-        SCRIPT_ROOT / "train_sinhala_sft.sh",
-    ]:
-        if candidate.exists():
-            shutil.copy(candidate, launcher_src)
-            break
-os.chmod(launcher_src, 0o755)
 
 # Run training
 print("[7] launching LLM training ...")
@@ -465,17 +451,7 @@ for m in ("llm", "flow", "hifigan"):
 # =============================================================================
 # Merge pretrained assets (yaml, onnx, BlankEN) with SFT-averaged weights.
 
-for src_name in ("export_sft_model.py",):
-    src_path = SCRIPTS_DIR / src_name
-    if not src_path.exists():
-        for candidate in [
-            WORKDIR / src_name,
-            Path("/kaggle/input/cosyvoice3-sinhala-scripts") / src_name,
-            SCRIPT_ROOT / src_name,
-        ]:
-            if candidate.exists():
-                shutil.copy(candidate, src_path)
-                break
+ensure_repo_layout()
 
 SFT_MODEL_DIR = WORKDIR / "sft_model"
 print(f"[10b] exporting inference model -> {SFT_MODEL_DIR}")
@@ -493,17 +469,8 @@ subprocess.check_call([
 # Generate 3 test sentences: one neutral, one with a Sinhala quote, one
 # a longer paragraph. Listen to the WAVs (Kaggle shows them inline).
 
-# Copy the inference script
+ensure_repo_layout()
 inf_src = SCRIPTS_DIR / "inference_sinhala.py"
-if not inf_src.exists():
-    for candidate in [
-        WORKDIR / "inference_sinhala.py",
-        Path("/kaggle/input/cosyvoice3-sinhala-scripts") / "inference_sinhala.py",
-        SCRIPT_ROOT / "inference_sinhala.py",
-    ]:
-        if candidate.exists():
-            shutil.copy(candidate, inf_src)
-            break
 
 env["COSYVOICE_REPO"] = str(WORKDIR / "CosyVoice")
 TEST_OUT = WORKDIR / "test_outputs"

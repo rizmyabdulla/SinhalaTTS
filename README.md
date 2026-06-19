@@ -25,10 +25,10 @@ Text normalization lives in [`sinhala_normalize.py`](sinhala_normalize.py) and i
 ## Kaggle (recommended)
 
 1. Create a Kaggle notebook with GPU enabled.
-2. Upload this repo's scripts as a Kaggle dataset, or copy them to `/kaggle/working/`.
-3. Run [`cosyvoice3_sinhala_kaggle.py`](cosyvoice3_sinhala_kaggle.py) (single cell or split at `# CELL N` markers).
+2. Copy all SinhalaTTS repo files into `/kaggle/working/` (Kaggle: **Add Data → Upload**, or add this repo as a notebook dataset).
+3. Run [`cosyvoice3_sinhala_kaggle.py`](cosyvoice3_sinhala_kaggle.py) (single cell or split at `# CELL N` markers). Run CELL 1 first if using split cells.
 
-The notebook installs deps, clones CosyVoice, downloads the [OpenSLR30](https://openslr.org/30/) corpus and pretrained weights, runs the full pipeline, and exports `sft_model/` for download. No separate Kaggle dataset attachment is required — OpenSLR30 is fetched automatically from openslr.org.
+The notebook installs deps, clones CosyVoice, downloads [OpenSLR30](https://openslr.org/30/) and pretrained weights, runs the full pipeline, and exports `sft_model/` for download. No separate Kaggle dataset attachment is required.
 
 ## Dataset
 
