@@ -2,15 +2,13 @@
 Convert the OpenSLR30 Sinhala TTS corpus into the Kaldi-style manifest
 files that CosyVoice3 expects.
 
-Input layout (Kaggle dataset `keshan/multi-speaket-tts-dataset-sinhala`,
-or extracted from si_lk.tar.gz on openslr.org/30):
+Input layout (extracted from si_lk.tar.gz on openslr.org/30):
 
-    /kaggle/input/multi-speaket-tts-dataset-sinhala/
-        si_lk/
-            wav/                        <- audio files
-                <spk>_<utt>.wav
-                ...
-            si_lk.lines.txt             <- TSV: utt_id spk_id transcript
+    si_lk/
+        wav/                        <- 16 kHz audio files
+            sin_<spk>_<utt>.wav
+            ...
+        si_lk.lines.txt             <- utterance id + transcript
 
 Output layout (under --des_dir):
 
@@ -75,10 +73,8 @@ def parse_openslr30_tsv(path: str) -> List[Tuple[str, str, str]]:
             raw = raw.rstrip("\n")
             if not raw.strip():
                 continue
-            # Two layouts occur in the wild:
-            #   "sin_2241_0329430812 <text...>"  (Kaggle version, no outer parens)
-            #   ( sin_2241_0329430812 " <text> " )  (raw openslr version)
-            # We handle both.
+            # OpenSLR30 format:
+            #   ( sin_2241_0329430812 " <text> " )
             line = raw.strip()
             if line.startswith("("):
                 line = line.lstrip("(").rstrip(")").strip()
@@ -87,8 +83,11 @@ def parse_openslr30_tsv(path: str) -> List[Tuple[str, str, str]]:
             if len(parts) != 2:
                 continue
             utt_id = parts[0].strip()
-            text_raw = parts[1].strip()
-            spk_id = utt_id.split("_")[0] + "_" + utt_id.split("_")[1]  # sin_XXXX
+            if not utt_id.startswith("sin_"):
+                continue
+            text_raw = parts[1].strip().strip('"')
+            id_parts = utt_id.split("_")
+            spk_id = "_".join(id_parts[:2]) if len(id_parts) >= 2 else id_parts[0]
             rows.append((utt_id, spk_id, text_raw))
     return rows
 
@@ -169,7 +168,7 @@ def split_train_dev(
 ) -> Tuple[List, List]:
     """Speaker-disjoint split: hold out `dev_speaker_ratio` of speakers.
 
-    OpenSLR30 has ~140 speakers. Holding out 10% of speakers (~14) gives
+    OpenSLR30 has ~12 speakers. Holding out 10% of speakers (~1–2) gives
     a clean dev set that tests zero-shot generalization.
     """
     rng = random.Random(seed)
@@ -213,7 +212,7 @@ def main():
     tsv = src / "si_lk.lines.txt"
     wav_src_dir = src / "wav"
     if not tsv.exists():
-        # Some Kaggle copies have a slightly different layout
+        # Search under src_dir if manifest is nested (e.g. after tar extract)
         candidates = list(src.rglob("si_lk.lines.txt"))
         if not candidates:
             sys.exit(f"!! could not find si_lk.lines.txt under {src}")

@@ -47,6 +47,11 @@ WORKDIR = Path("/kaggle/working")
 WORKDIR.mkdir(exist_ok=True)
 os.chdir(WORKDIR)
 
+try:
+    SCRIPT_ROOT = Path(__file__).resolve().parent
+except NameError:
+    SCRIPT_ROOT = WORKDIR  # notebook cells have no __file__
+
 # Pin the exact stack CosyVoice3 was developed against. This is critical
 # because mismatched versions of conformer / matcha / pyworld will silently
 # break the DiT flow decoder and produce garbled audio at inference.
@@ -100,18 +105,16 @@ if not (WORKDIR / "CosyVoice").exists():
 else:
     print("[1] CosyVoice already present")
 
-# Patch: CosyVoice's CausalHiFTGenerator uses torch.nn.functional.pca_lowrank
-# which was removed in newer PyTorch. This monkey-patch keeps it working
-# with the deepspeed/torch combo Kaggle ships.
-import torch.nn.functional as F  # noqa
-if not hasattr(F, "pca_lowrank"):
+# Patch: CosyVoice uses torch.pca_lowrank which was removed in newer PyTorch.
+# This monkey-patch keeps it working with the deepspeed/torch combo Kaggle ships.
+import torch
+if not hasattr(torch, "pca_lowrank"):
     def _pca_lowrank(X, q=None, center=True, niter=2):
-        # Approximate the now-removed helper using torch.svd_lowrank.
-        # CosyVoice only calls this during init (no autograd) so a
-        # faithful no-grad approximation is fine.
+        if center:
+            X = X - X.mean(dim=0, keepdim=True)
         return torch.svd_lowrank(X, q=q or 1, niter=niter)
-    F.pca_lowrank = _pca_lowrank
-    print("[1] patched torch.nn.functional.pca_lowrank")
+    torch.pca_lowrank = _pca_lowrank
+    print("[1] patched torch.pca_lowrank")
 
 # Make `from cosyvoice.X import Y` work
 sys.path.insert(0, str(WORKDIR / "CosyVoice"))
@@ -119,7 +122,6 @@ sys.path.insert(0, str(WORKDIR / "CosyVoice" / "third_party" / "Matcha-TTS"))
 print(f"[1] cosyvoice on path: {(WORKDIR / 'CosyVoice') in [Path(p) for p in sys.path]}")
 
 # GPU sanity
-import torch
 print(f"[1] torch={torch.__version__}  cuda={torch.cuda.is_available()}  "
       f"device={torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'}")
 
@@ -129,15 +131,10 @@ print(f"[1] torch={torch.__version__}  cuda={torch.cuda.is_available()}  "
 # =============================================================================
 # We pull:
 #   (a) Fun-CosyVoice3-0.5B-2512 from Hugging Face (~12 GB on disk)
-#   (b) OpenSLR30 Sinhala TTS from a Kaggle dataset mirror
+#   (b) OpenSLR30 Sinhala TTS from openslr.org/30 (si_lk.tar.gz, ~700 MB)
 #
-# Using the Kaggle mirror is much faster than pulling from openslr.org
-# directly — the dataset is hosted on GCS and piped in via the Kaggle
-# input mount.
-#
-# The Kaggle dataset "keshan/multi-speaket-tts-dataset-sinhala" is the
-# official OpenSLR30 data, just repackaged. If you can't add it to the
-# notebook, comment out that line and we'll fall back to the openslr URL.
+# Dataset: Google-collected multi-speaker Sinhala corpus (SLR30, CC BY-SA 4.0).
+# Manifest: si_lk/si_lk.lines.txt + si_lk/wav/*.wav
 
 PRETRAIN_DIR = WORKDIR / "pretrained_models" / "Fun-CosyVoice3-0.5B-2512"
 PRETRAIN_DIR.parent.mkdir(parents=True, exist_ok=True)
@@ -157,38 +154,33 @@ if not PRETRAIN_DIR.exists() or not (PRETRAIN_DIR / "cosyvoice3.yaml").exists():
 else:
     print(f"[2] pretrained model already at {PRETRAIN_DIR}")
 
-# Sinhala data: prefer the Kaggle mirror, fall back to openslr.org
-SINHALA_SRC = None
-KAGGLE_INPUT = Path("/kaggle/input/multi-speaket-tts-dataset-sinhala")
-if KAGGLE_INPUT.exists():
-    # The dataset ships the audio and the TSV
-    wav_dir = KAGGLE_INPUT / "wav"
-    tsv = KAGGLE_INPUT / "si_lk" / "si_lk.lines.txt"
-    if not tsv.exists():
-        # Some layouts have a different root
-        tsv = next(KAGGLE_INPUT.rglob("si_lk.lines.txt"), None)
-    if tsv:
-        SINHALA_SRC = tsv.parent
-        print(f"[2] using Kaggle Sinhala dataset: {SINHALA_SRC}")
-    else:
-        print(f"[2] !! si_lk.lines.txt not found under {KAGGLE_INPUT}, will fall back")
-elif (WORKDIR / "sinhala_wav").exists():
-    SINHALA_SRC = WORKDIR / "sinhala_wav"
-    print(f"[2] using local Sinhala wav dir: {SINHALA_SRC}")
+# OpenSLR30 Sinhala TTS (openslr.org/30)
+SINHALA_SRC = WORKDIR / "si_lk"
+if SINHALA_SRC.exists() and (SINHALA_SRC / "si_lk.lines.txt").exists():
+    print(f"[2] using extracted OpenSLR30 corpus: {SINHALA_SRC}")
 else:
-    print("[2] downloading from openslr.org/30 (slower, ~700 MB)")
+    print("[2] downloading OpenSLR30 from openslr.org/30 (~700 MB) ...")
     tarball = WORKDIR / "si_lk.tar.gz"
     if not tarball.exists():
         subprocess.check_call([
             "curl", "-L", "-o", str(tarball),
             "https://www.openslr.org/resources/30/si_lk.tar.gz",
         ])
-    if not (WORKDIR / "si_lk").exists():
+    if not SINHALA_SRC.exists():
         subprocess.check_call(["tar", "-xzf", str(tarball), "-C", str(WORKDIR)])
-    SINHALA_SRC = WORKDIR / "si_lk"
+    if not (SINHALA_SRC / "si_lk.lines.txt").exists():
+        candidates = list(WORKDIR.rglob("si_lk.lines.txt"))
+        if candidates:
+            SINHALA_SRC = candidates[0].parent
+        else:
+            raise FileNotFoundError(
+                f"!! si_lk.lines.txt not found after extracting {tarball}"
+            )
+    print(f"[2]   extracted -> {SINHALA_SRC}")
 
-assert SINHALA_SRC is not None, "!! Sinhala data not found"
-print(f"[2]   {len(list((SINHALA_SRC/'wav').glob('*.wav'))) if (SINHALA_SRC/'wav').exists() else 'unknown'} wavs under {SINHALA_SRC}")
+wav_dir = SINHALA_SRC / "wav"
+n_wavs = len(list(wav_dir.glob("*.wav"))) if wav_dir.exists() else 0
+print(f"[2]   {n_wavs} wavs under {SINHALA_SRC}")
 
 
 # =============================================================================
@@ -215,9 +207,10 @@ for src_name in ("sinhala_normalize.py", "prepare_sinhala_data.py"):
     if not src_path.exists():
         # try the local repo path
         for candidate in [
+            WORKDIR / src_name,
             WORKDIR / "sinhala_tts" / src_name,
             Path("/kaggle/input/cosyvoice3-sinhala-scripts") / src_name,
-            Path(__file__).resolve().parent / src_name,
+            SCRIPT_ROOT / src_name,
         ]:
             if candidate.exists():
                 shutil.copy(candidate, src_path)
@@ -255,8 +248,9 @@ for src_name in ("extract_features.py",):
     src_path = SCRIPTS_DIR / src_name
     if not src_path.exists():
         for candidate in [
+            WORKDIR / src_name,
             Path("/kaggle/input/cosyvoice3-sinhala-scripts") / src_name,
-            Path(__file__).resolve().parent / src_name,
+            SCRIPT_ROOT / src_name,
         ]:
             if candidate.exists():
                 shutil.copy(candidate, src_path)
@@ -289,8 +283,9 @@ for src_name in ("build_parquet.py",):
     src_path = SCRIPTS_DIR / src_name
     if not src_path.exists():
         for candidate in [
+            WORKDIR / src_name,
             Path("/kaggle/input/cosyvoice3-sinhala-scripts") / src_name,
-            Path(__file__).resolve().parent / src_name,
+            SCRIPT_ROOT / src_name,
         ]:
             if candidate.exists():
                 shutil.copy(candidate, src_path)
@@ -313,10 +308,10 @@ for split in ("train", "dev"):
 
 # Build concatenated train/dev data.list
 (DATA_OUT / "train.data.list").write_text(
-    "\n".join((DATA_OUT / "train/parquet/data.list").read_text().splitlines())
+    (DATA_OUT / "train/parquet/data.list").read_text(encoding="utf-8")
 )
 (DATA_OUT / "dev.data.list").write_text(
-    "\n".join((DATA_OUT / "dev/parquet/data.list").read_text().splitlines())
+    (DATA_OUT / "dev/parquet/data.list").read_text(encoding="utf-8")
 )
 print(f"[5]   wrote {DATA_OUT}/train.data.list and dev.data.list")
 
@@ -331,7 +326,10 @@ print(f"[5]   wrote {DATA_OUT}/train.data.list and dev.data.list")
 
 print("[6] pre-training data sanity check ...")
 import pyarrow.parquet as pq
-sample_pq = next((DATA_OUT / "train/parquet").glob("parquet_*.parquet"))
+parquet_files = sorted((DATA_OUT / "train/parquet").glob("parquet_*.parquet"))
+if not parquet_files:
+    raise FileNotFoundError(f"no parquet shards in {DATA_OUT / 'train/parquet'}")
+sample_pq = parquet_files[0]
 df = pq.read_table(sample_pq).to_pandas()
 print(f"[6]   parquet {sample_pq.name} -> {len(df)} utts, "
       f"audio bytes: {len(df.iloc[0]['audio_data'])}")
@@ -363,8 +361,9 @@ for src_name in ("cosyvoice3_sinhala_sft.yaml", "ds_stage2.json"):
     src_path = WORKDIR / "configs" / src_name
     if not src_path.exists():
         for candidate in [
+            WORKDIR / src_name,
             Path("/kaggle/input/cosyvoice3-sinhala-configs") / src_name,
-            Path(__file__).resolve().parent / src_name,
+            SCRIPT_ROOT / src_name,
         ]:
             if candidate.exists():
                 src_path.parent.mkdir(exist_ok=True)
@@ -382,8 +381,9 @@ shutil.copy(WORKDIR / "configs" / "ds_stage2.json", TARGET_DS)
 launcher_src = SCRIPTS_DIR / "train_sinhala_sft.sh"
 if not launcher_src.exists():
     for candidate in [
+        WORKDIR / "train_sinhala_sft.sh",
         Path("/kaggle/input/cosyvoice3-sinhala-scripts") / "train_sinhala_sft.sh",
-        Path(__file__).resolve().parent / "train_sinhala_sft.sh",
+        SCRIPT_ROOT / "train_sinhala_sft.sh",
     ]:
         if candidate.exists():
             shutil.copy(candidate, launcher_src)
@@ -469,8 +469,9 @@ for src_name in ("export_sft_model.py",):
     src_path = SCRIPTS_DIR / src_name
     if not src_path.exists():
         for candidate in [
+            WORKDIR / src_name,
             Path("/kaggle/input/cosyvoice3-sinhala-scripts") / src_name,
-            Path(__file__).resolve().parent / src_name,
+            SCRIPT_ROOT / src_name,
         ]:
             if candidate.exists():
                 shutil.copy(candidate, src_path)
@@ -496,8 +497,9 @@ subprocess.check_call([
 inf_src = SCRIPTS_DIR / "inference_sinhala.py"
 if not inf_src.exists():
     for candidate in [
+        WORKDIR / "inference_sinhala.py",
         Path("/kaggle/input/cosyvoice3-sinhala-scripts") / "inference_sinhala.py",
-        Path(__file__).resolve().parent / "inference_sinhala.py",
+        SCRIPT_ROOT / "inference_sinhala.py",
     ]:
         if candidate.exists():
             shutil.copy(candidate, inf_src)

@@ -140,7 +140,7 @@ def main():
     utt2parquet_list = []
     spk2parquet_list = []
     t0 = time.time()
-    for i, j in enumerate(range(0, len(utts), args.num_utts_per_parquet)):
+    for i, j in enumerate(tqdm(range(0, len(utts), args.num_utts_per_parquet), desc="sharding")):
         chunk = utts[j: j + args.num_utts_per_parquet]
         shard = build_shard(
             chunk, utt2wav, utt2text, utt2spk, utt2instruct,

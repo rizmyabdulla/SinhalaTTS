@@ -35,8 +35,7 @@ Sinhala has three known trouble spots we must handle:
 The output of this module is what gets written to the Kaldi `text` file
 and ultimately fed to the Qwen2 tokenizer as `sample['text']`.
 
-Tested on: OpenSLR30 si_lk.lines.txt, Path Nirvana Sinhala TTS, XLR-S,
-and the Sinhala SinLlama training corpus.
+Tested on: OpenSLR30 si_lk.lines.txt and the Sinhala SinLlama training corpus.
 """
 
 from __future__ import annotations
@@ -110,7 +109,7 @@ def _strip_isolated_diacritics(text: str) -> str:
     consonant these characters have no pronunciation, so we drop them.
     """
     out = []
-    prev_was_base = True  # start of string counts as a "base"
+    prev_was_base = False
     for ch in text:
         cp = ord(ch)
         # Sinhala independent vowels (U+0D85..U+0D96) ARE base chars.
@@ -236,3 +235,7 @@ if __name__ == "__main__":
         print(f"IN : {s!r}")
         print(f"OUT: {out!r}  (valid={valid})")
         print("---")
+
+    # Orphan leading diacritic must be dropped
+    orphan = "\u0DCF"  # kombuva without base consonant
+    assert _strip_isolated_diacritics(orphan) == ""

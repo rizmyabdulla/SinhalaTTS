@@ -23,7 +23,7 @@ def cmd_norm(_):
     from sinhala_normalize import normalize_sinhala, is_valid_transcript
 
     cases = [
-        "à¶šà·à¶šà¶§à¶ à·Š à¶¸à¶‚",
+        "කොස් කම කළේ මට නම් මට කියන්න",
         "කොස් කම කළේ මට නම්",
         "෴ වෙනි පටන් 1 2 3",
         "\" කොස් කම කළේ \"",
@@ -39,7 +39,11 @@ def cmd_norm(_):
 def cmd_data(args):
     import pyarrow.parquet as pq
     data_dir = Path(args.data_dir)
-    pq_files = list((data_dir / "parquet").glob("parquet_*.parquet"))
+    parquet_dir = data_dir / "parquet"
+    if not parquet_dir.exists():
+        print(f"!! {parquet_dir} does not exist")
+        return
+    pq_files = sorted(parquet_dir.glob("parquet_*.parquet"))
     if not pq_files:
         print(f"!! no parquet files in {data_dir}/parquet")
         return
@@ -86,7 +90,10 @@ def cmd_ckpt(args):
         print(f"!! {p} not found")
         return
     print(f"  checkpoint: {p}  ({p.stat().st_size/1e6:.1f} MB)")
-    state = torch.load(p, map_location="cpu", weights_only=False)
+    try:
+        state = torch.load(p, map_location="cpu", weights_only=True)
+    except Exception:
+        state = torch.load(p, map_location="cpu", weights_only=False)
     if isinstance(state, dict):
         # Could be a state dict
         keys = list(state.keys())[:10]

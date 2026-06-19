@@ -125,7 +125,7 @@ class SpeechTokenizerV3:
         self.mel_fn = torchaudio.transforms.MelSpectrogram(
             sample_rate=24000,
             n_fft=1920,
-            num_mels=80,
+            n_mels=80,
             hop_length=480,
             win_length=1920,
             f_min=0.0,
@@ -178,15 +178,15 @@ def main():
 
     data_dir = Path(args.data_dir)
     wav_scp = data_dir / "wav.scp"
-    utt2spk = data_dir / "utt2spk"
+    utt2spk_path = data_dir / "utt2spk"
     if not wav_scp.exists():
         sys.exit(f"!! {wav_scp} not found. Run prepare_sinhala_data.py first.")
-    if not utt2spk.exists():
-        sys.exit(f"!! {utt2spk} not found. Run prepare_sinhala_data.py first.")
+    if not utt2spk_path.exists():
+        sys.exit(f"!! {utt2spk_path} not found. Run prepare_sinhala_data.py first.")
 
     # Load manifest
     wav_lines = wav_scp.read_text(encoding="utf-8").strip().splitlines()
-    spk_lines = utt2spk.read_text(encoding="utf-8").strip().splitlines()
+    spk_lines = utt2spk_path.read_text(encoding="utf-8").strip().splitlines()
     utt2wav = dict(line.split(maxsplit=1) for line in wav_lines)
     utt2spk = dict(line.split(maxsplit=1) for line in spk_lines)
     if args.limit:

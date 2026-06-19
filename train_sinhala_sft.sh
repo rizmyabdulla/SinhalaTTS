@@ -44,7 +44,11 @@ STAGE=${1:-llm}
 
 # Kaggle T4x2: only one GPU to avoid DDP bottleneck
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"0"}
-NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | awk -F "," '{print NF}')
+if [ -z "${CUDA_VISIBLE_DEVICES}" ]; then
+    NUM_GPUS=1
+else
+    NUM_GPUS=$(echo "$CUDA_VISIBLE_DEVICES" | awk -F',' '{print NF}')
+fi
 
 cd "${REPO_ROOT}"
 
@@ -69,6 +73,20 @@ mkdir -p "${EXP_DIR}" "${TB_DIR}"
 cat "${DATA_DIR}"/train/parquet/data.list > "${DATA_DIR}/train.data.list"
 cat "${DATA_DIR}"/dev/parquet/data.list > "${DATA_DIR}/dev.data.list"
 
+# Apply shell env overrides to yaml (CosyVoice train.py reads train_conf from config)
+python - "${CONFIG}" "${SAVE_EVERY}" "${MAX_EPOCH}" "${LOG_INTERVAL}" <<'PY'
+import re, sys
+from pathlib import Path
+
+cfg = Path(sys.argv[1])
+save_every, max_epoch, log_interval = sys.argv[2:5]
+text = cfg.read_text(encoding="utf-8")
+text = re.sub(r"(save_per_step:\s*)\d+", rf"\g<1>{save_every}", text)
+text = re.sub(r"(max_epoch:\s*)\d+", rf"\g<1>{max_epoch}", text)
+text = re.sub(r"(log_interval:\s*)\d+", rf"\g<1>{log_interval}", text)
+cfg.write_text(text, encoding="utf-8")
+PY
+
 # --- launch -----------------------------------------------------------------
 train_engine=deepspeed
 job_id=$((RANDOM % 9999))
@@ -87,9 +105,12 @@ train_model() {
     echo "  tensorboard:    ${tb_dir}"
     echo "=========================================================="
 
+    local free_port
+    free_port=$(python -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+
     # The LLM uses Qwen2-BlankEN; flow/hift are pure DiT/HiFT.
     torchrun --nnodes=1 --nproc_per_node=${NUM_GPUS} \
-        --rdzv_id=${job_id} --rdzv_backend="c10d" --rdzv_endpoint="localhost:1234" \
+        --rdzv_id=${job_id} --rdzv_backend="c10d" --rdzv_endpoint="localhost:${free_port}" \
         "${REPO_ROOT}/cosyvoice/bin/train.py" \
         --train_engine "${train_engine}" \
         --config "${CONFIG}" \
@@ -107,9 +128,7 @@ train_model() {
         --pin_memory \
         --use_amp \
         --deepspeed_config "${DS_CONFIG}" \
-        --deepspeed.save_states "model+optimizer" \
-        --max_epoch "${MAX_EPOCH}" \
-        --log_interval "${LOG_INTERVAL}"
+        --deepspeed.save_states "model+optimizer"
 }
 
 average_ckpt() {
