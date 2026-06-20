@@ -11,14 +11,14 @@ Fine-tune [Fun-CosyVoice3-0.5B](https://huggingface.co/FunAudioLLM/Fun-CosyVoice
 
 ## Pipeline
 
-| Step | Script | Output |
-|------|--------|--------|
-| 1. Prepare data | `prepare_sinhala_data.py` | Kaldi-style `wav.scp`, `text`, `utt2spk`, `spk2utt`, `instruct` |
-| 2. Extract features | `extract_features.py` | `utt2embedding.pt`, `spk2embedding.pt`, `utt2speech_token.pt` |
-| 3. Build parquet | `build_parquet.py` | `parquet/` shards + `data.list` |
-| 4. Train | `train_sinhala_sft.sh` | Checkpoints under `exp/cosyvoice3/` |
-| 5. Export | `export_sft_model.py` | `sft_model/` inference bundle |
-| 6. Infer | `inference_sinhala.py` | WAV files |
+| Step                | Script                    | Output                                                          |
+| ------------------- | ------------------------- | --------------------------------------------------------------- |
+| 1. Prepare data     | `prepare_sinhala_data.py` | Kaldi-style `wav.scp`, `text`, `utt2spk`, `spk2utt`, `instruct` |
+| 2. Extract features | `extract_features.py`     | `utt2embedding.pt`, `spk2embedding.pt`, `utt2speech_token.pt`   |
+| 3. Build parquet    | `build_parquet.py`        | `parquet/` shards + `data.list`                                 |
+| 4. Train            | `train_sinhala_sft.sh`    | Checkpoints under `exp/cosyvoice3/`                             |
+| 5. Export           | `export_sft_model.py`     | `sft_model/` inference bundle                                   |
+| 6. Infer            | `inference_sinhala.py`    | WAV files                                                       |
 
 Text normalization lives in [`sinhala_normalize.py`](sinhala_normalize.py) and is applied during data prep and inference.
 

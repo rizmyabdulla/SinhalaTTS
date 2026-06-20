@@ -82,18 +82,19 @@ def find_repo_file(name: str) -> Path | None:
 
 
 def stage_repo_file(name: str, dest: Path) -> Path:
-    """Copy a repo file into dest if not already present."""
+    """Copy a repo file into dest, refreshing when the source is newer."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
-        return dest
     src = find_repo_file(name)
     if src is None:
+        if dest.exists():
+            return dest
         raise FileNotFoundError(
             f"!! {name} not found under {WORKDIR}. "
             "Copy the SinhalaTTS repo files into /kaggle/working/ "
             "(same folder as this notebook)."
         )
-    shutil.copy(src, dest)
+    if src.resolve() != dest.resolve():
+        shutil.copy(src, dest)
     return dest
 
 

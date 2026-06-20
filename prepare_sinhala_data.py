@@ -104,7 +104,7 @@ def resample_to_24k(src: str, dst: str, target_sr: int = 24000) -> bool:
     if sr != target_sr:
         wav = torchaudio.functional.resample(
             wav, orig_freq=sr, new_freq=target_sr,
-            resampling_method="kaiser_best",
+            resampling_method="sinc_interp_hann",
         )
     wav = wav.clamp(-1.0, 1.0)
     # torchaudio.save requires a tensor of shape (channels, samples)

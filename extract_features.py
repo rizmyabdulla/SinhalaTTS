@@ -37,6 +37,7 @@ import onnxruntime as ort
 import torch
 import torchaudio
 import torchaudio.compliance.kaldi as kaldi
+import whisper
 from tqdm import tqdm
 
 
@@ -76,7 +77,7 @@ class CampPlusEmbedder:
         if key not in self._resamplers:
             self._resamplers[key] = torchaudio.transforms.Resample(
                 orig_freq=sr, new_freq=self.target_sr,
-                resampling_method="kaiser_best",
+                resampling_method="sinc_interp_hann",
             )
         return self._resamplers[key](wav)
 
@@ -112,9 +113,9 @@ class CampPlusEmbedder:
 class SpeechTokenizerV3:
     """Wrap speech_tokenizer_v3.onnx for waveform -> discrete token ids.
 
-    The ONNX takes (B, 80, T) log-mel features (24 kHz) and produces
-    (B, T_token) int32 token ids. The token vocabulary is 6561 (81^2,
-    2-D RVQ from CosyVoice3).
+    Matches CosyVoice3 upstream (cosyvoice/cli/frontend.py):
+    16 kHz audio -> whisper.log_mel_spectrogram(n_mels=128) -> ONNX input
+    shape (B, 128, T). Token vocabulary is 6561 (81^2, 2-D RVQ).
     """
     def __init__(self, onnx_path: str, device: str = "cuda"):
         providers = (["CUDAExecutionProvider"]
@@ -122,36 +123,31 @@ class SpeechTokenizerV3:
                      else ["CPUExecutionProvider"])
         self.session = make_session(onnx_path, providers=providers)
         self.device = device
-        self.mel_fn = torchaudio.transforms.MelSpectrogram(
-            sample_rate=24000,
-            n_fft=1920,
-            n_mels=80,
-            hop_length=480,
-            win_length=1920,
-            f_min=0.0,
-            f_max=None,
-            center=False,
-            power=1.0,
-        ).to(device)
+        self.target_sr = 16000
 
     @torch.inference_mode()
     def encode(self, wav_path: str) -> torch.Tensor:
         wav, sr = torchaudio.load(wav_path)
-        if sr != 24000:
-            wav = torchaudio.functional.resample(
-                wav, orig_freq=sr, new_freq=24000, resampling_method="kaiser_best",
-            )
         if wav.shape[0] > 1:
             wav = wav.mean(dim=0, keepdim=True)
-        wav = wav.to(self.device)
-        # log-mel
-        feat = torch.log(torch.clamp(self.mel_fn(wav), min=1e-5))  # (1, 80, T)
-        feat_lens = torch.tensor([feat.shape[2]], dtype=torch.int32, device=self.device)
+        if sr != self.target_sr:
+            wav = torchaudio.functional.resample(
+                wav,
+                orig_freq=sr,
+                new_freq=self.target_sr,
+                resampling_method="sinc_interp_hann",
+            )
+        # whisper expects (1, samples); output is (1, 128, T) or (128, T)
+        speech = wav if wav.dim() == 2 else wav.unsqueeze(0)
+        feat = whisper.log_mel_spectrogram(speech, n_mels=128)
+        if feat.dim() == 2:
+            feat = feat.unsqueeze(0)
+        feat_len = np.array([feat.shape[2]], dtype=np.int32)
         out, out_lens = self.session.run(
             None,
             {
-                self.session.get_inputs()[0].name: feat.transpose(1, 2).cpu().numpy(),
-                self.session.get_inputs()[1].name: feat_lens.cpu().numpy(),
+                self.session.get_inputs()[0].name: feat.cpu().numpy(),
+                self.session.get_inputs()[1].name: feat_len,
             },
         )
         return torch.tensor(out[0], dtype=torch.int32), int(out_lens[0][0])
