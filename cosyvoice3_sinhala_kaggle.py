@@ -57,6 +57,7 @@ except NameError:
 
 SCRIPTS_DIR = WORKDIR / "scripts"
 CONFIGS_DIR = WORKDIR / "configs"
+STUBS_DIR = WORKDIR / "stubs"
 _REPO_SCRIPTS = (
     "sinhala_normalize.py",
     "prepare_sinhala_data.py",
@@ -65,6 +66,10 @@ _REPO_SCRIPTS = (
     "export_sft_model.py",
     "inference_sinhala.py",
     "train_sinhala_sft.sh",
+    "whisper_mel.py",
+)
+_REPO_STUBS = (
+    "stubs/whisper/__init__.py",
 )
 _REPO_CONFIGS = (
     "cosyvoice3_sinhala_sft.yaml",
@@ -102,9 +107,38 @@ def ensure_repo_layout() -> None:
     """Stage all SinhalaTTS helper scripts and configs under WORKDIR."""
     for name in _REPO_SCRIPTS:
         stage_repo_file(name, SCRIPTS_DIR / name)
+    for name in _REPO_STUBS:
+        stage_repo_file(name, WORKDIR / name)
     for name in _REPO_CONFIGS:
         stage_repo_file(name, CONFIGS_DIR / name)
     os.chmod(SCRIPTS_DIR / "train_sinhala_sft.sh", 0o755)
+
+
+def bootstrap_whisper_stub() -> None:
+    """Ensure Py3.12-safe whisper stub exists (no openai-whisper pip install)."""
+    SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+    (STUBS_DIR / "whisper").mkdir(parents=True, exist_ok=True)
+    mel_dest = SCRIPTS_DIR / "whisper_mel.py"
+    stub_dest = STUBS_DIR / "whisper" / "__init__.py"
+    if not mel_dest.exists():
+        stage_repo_file("whisper_mel.py", mel_dest)
+    if not stub_dest.exists():
+        try:
+            stage_repo_file("stubs/whisper/__init__.py", stub_dest)
+        except FileNotFoundError:
+            stub_dest.write_text(
+                "from whisper_mel import log_mel_spectrogram\n"
+                '__all__ = ["log_mel_spectrogram"]\n',
+                encoding="utf-8",
+            )
+
+
+def whisper_stub_paths() -> None:
+    """Put librosa-based whisper stub ahead of site-packages (Py3.12 safe)."""
+    bootstrap_whisper_stub()
+    for path in (str(SCRIPTS_DIR), str(STUBS_DIR)):
+        if path not in sys.path:
+            sys.path.insert(0, path)
 
 # Pin the exact stack CosyVoice3 was developed against. This is critical
 # because mismatched versions of conformer / matcha / pyworld will silently
@@ -130,7 +164,8 @@ REQS = [
     "omegaconf==2.3.0",
     "onnx==1.16.0",
     "onnxruntime-gpu==1.18.0",
-    "openai-whisper==20231117",
+    # openai-whisper omitted: fails to build on Kaggle Python 3.12.
+    # whisper_mel.py + stubs/whisper/ provide whisper.log_mel_spectrogram instead.
     "protobuf==4.25",
     "pyarrow==18.1.0",
     "pydantic==2.7.0",
@@ -147,6 +182,15 @@ print(f"[1] installing {len(REQS)} packages (this can take ~3 min) ...")
 t0 = time.time()
 subprocess.check_call([PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir"] + REQS)
 print(f"[1]   done in {time.time()-t0:.1f}s")
+
+try:
+    ensure_repo_layout()
+except FileNotFoundError as exc:
+    print(f"[1]   repo staging skipped ({exc})")
+
+whisper_stub_paths()
+import whisper as _whisper_check  # noqa: E402
+print(f"[1] whisper stub ok (log_mel from {_whisper_check.log_mel_spectrogram.__module__})")
 
 # Clone CosyVoice (shallow clone keeps it fast)
 if not (WORKDIR / "CosyVoice").exists():
@@ -388,6 +432,8 @@ env.update({
     "TB_DIR": str(WORKDIR / "tensorboard" / "cosyvoice3"),
     "CONFIG": str(TARGET_CONFIG),
     "DS_CONFIG": str(TARGET_DS),
+    "SCRIPTS_DIR": str(SCRIPTS_DIR),
+    "STUBS_DIR": str(STUBS_DIR),
     "NUM_WORKERS": "2",
     "PREFETCH": "100",
     "SAVE_EVERY": "500",

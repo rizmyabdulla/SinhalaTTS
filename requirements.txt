@@ -13,7 +13,8 @@ numpy==1.26.4
 omegaconf==2.3.0
 onnx==1.16.0
 onnxruntime-gpu==1.18.0
-openai-whisper==20231117
+# Optional: openai-whisper only needed if not using stubs/whisper (see whisper_mel.py).
+# On Python 3.12+ Kaggle kernels, use the stub instead of pip-installing whisper.
 protobuf==4.25
 pyarrow==18.1.0
 pydantic==2.7.0

@@ -32,13 +32,18 @@ import time
 from pathlib import Path
 from typing import Dict, List
 
+_SCRIPTS = Path(__file__).resolve().parent
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
 import numpy as np
 import onnxruntime as ort
 import torch
 import torchaudio
 import torchaudio.compliance.kaldi as kaldi
-import whisper
 from tqdm import tqdm
+
+from whisper_mel import log_mel_spectrogram as whisper_log_mel_spectrogram
 
 
 # -----------------------------------------------------------------------------
@@ -114,7 +119,7 @@ class SpeechTokenizerV3:
     """Wrap speech_tokenizer_v3.onnx for waveform -> discrete token ids.
 
     Matches CosyVoice3 upstream (cosyvoice/cli/frontend.py):
-    16 kHz audio -> whisper.log_mel_spectrogram(n_mels=128) -> ONNX input
+    16 kHz audio -> whisper_log_mel_spectrogram(n_mels=128) -> ONNX input
     shape (B, 128, T). Token vocabulary is 6561 (81^2, 2-D RVQ).
     """
     def __init__(self, onnx_path: str, device: str = "cuda"):
@@ -137,11 +142,8 @@ class SpeechTokenizerV3:
                 new_freq=self.target_sr,
                 resampling_method="sinc_interp_hann",
             )
-        # whisper expects (1, samples); output is (1, 128, T) or (128, T)
         speech = wav if wav.dim() == 2 else wav.unsqueeze(0)
-        feat = whisper.log_mel_spectrogram(speech, n_mels=128)
-        if feat.dim() == 2:
-            feat = feat.unsqueeze(0)
+        feat = whisper_log_mel_spectrogram(speech, n_mels=128)
         feat_len = np.array([feat.shape[2]], dtype=np.int32)
         out, out_lens = self.session.run(
             None,

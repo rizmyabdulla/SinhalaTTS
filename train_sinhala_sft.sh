@@ -27,6 +27,10 @@
 set -euo pipefail
 
 # --- env --------------------------------------------------------------------
+SCRIPTS_DIR=${SCRIPTS_DIR:-"/kaggle/working/scripts"}
+STUBS_DIR=${STUBS_DIR:-"/kaggle/working/stubs"}
+export PYTHONPATH="${SCRIPTS_DIR}:${STUBS_DIR}:${PYTHONPATH:-}"
+
 REPO_ROOT=${REPO_ROOT:-"/kaggle/working/CosyVoice"}
 PRETRAINED_DIR=${PRETRAINED_DIR:-"/kaggle/working/pretrained_models/Fun-CosyVoice3-0.5B-2512"}
 DATA_DIR=${DATA_DIR:-"/kaggle/working/sinhala_data"}
