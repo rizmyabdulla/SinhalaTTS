@@ -2,13 +2,13 @@
 Convert the OpenSLR30 Sinhala TTS corpus into the Kaldi-style manifest
 files that CosyVoice3 expects.
 
-Input layout (extracted from si_lk.tar.gz on openslr.org/30):
+Input layout (OpenSLR30 on openslr.org/30):
 
     si_lk/
-        wav/                        <- 16 kHz audio files
+        wav/                        <- 16 kHz audio files (from si_lk.tar.gz)
             sin_<spk>_<utt>.wav
             ...
-        si_lk.lines.txt             <- utterance id + transcript
+        si_lk.lines.txt             <- utterance id + transcript (separate download)
 
 Output layout (under --des_dir):
 

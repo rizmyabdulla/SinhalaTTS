@@ -140,6 +140,97 @@ def whisper_stub_paths() -> None:
         if path not in sys.path:
             sys.path.insert(0, path)
 
+
+OPENSLR30_TARBALL_URL = "https://www.openslr.org/resources/30/si_lk.tar.gz"
+OPENSLR30_LINES_URL = "https://openslr.trmal.net/resources/30/si_lk.lines.txt"
+OPENSLR30_MIN_WAVS = 1000  # corpus ships ~1251 utterances
+
+
+def count_sin_wavs(root: Path) -> int:
+    return len(list(root.rglob("sin_*.wav")))
+
+
+def find_sin_wav_dir(root: Path) -> Path | None:
+    """Return the directory holding the most sin_*.wav files under root."""
+    best: tuple[int, Path] | None = None
+    seen: set[Path] = set()
+    for d in (root, root / "si_lk", root / "si_lk" / "wav", root / "wav"):
+        if d.is_dir() and d not in seen:
+            seen.add(d)
+            n = len(list(d.glob("sin_*.wav")))
+            if best is None or n > best[0]:
+                best = (n, d)
+    for d in root.rglob("*"):
+        if not d.is_dir() or d in seen:
+            continue
+        seen.add(d)
+        n = len(list(d.glob("sin_*.wav")))
+        if n and (best is None or n > best[0]):
+            best = (n, d)
+    return best[1] if best and best[0] else None
+
+
+def normalize_openslr30_corpus(workdir: Path) -> tuple[Path, Path]:
+    """Move sin_*.wav into si_lk/wav/ (layout prepare_sinhala_data expects)."""
+    sinhala_src = workdir / "si_lk"
+    sinhala_src.mkdir(parents=True, exist_ok=True)
+    target_wav = sinhala_src / "wav"
+    found = find_sin_wav_dir(workdir)
+    if found is None:
+        target_wav.mkdir(parents=True, exist_ok=True)
+        return sinhala_src, target_wav
+    if found.resolve() != target_wav.resolve():
+        print(f"[2]   normalizing wav layout: {found} -> {target_wav}")
+        target_wav.mkdir(parents=True, exist_ok=True)
+        for wav in found.glob("sin_*.wav"):
+            dest = target_wav / wav.name
+            if not dest.exists():
+                shutil.move(str(wav), str(dest))
+    return sinhala_src, target_wav
+
+
+def ensure_openslr30_corpus(workdir: Path) -> tuple[Path, Path]:
+    """Download/extract OpenSLR30 audio + manifest; return (si_lk/, si_lk/wav/)."""
+    tarball = workdir / "si_lk.tar.gz"
+    n_wavs = count_sin_wavs(workdir)
+    if n_wavs < OPENSLR30_MIN_WAVS:
+        print(f"[2] downloading OpenSLR30 audio si_lk.tar.gz (~700 MB) ...")
+        sys.stdout.flush()
+        if not tarball.exists():
+            subprocess.check_call([
+                "curl", "-L", "-o", str(tarball),
+                OPENSLR30_TARBALL_URL,
+            ])
+        print("[2] extracting si_lk.tar.gz ...")
+        sys.stdout.flush()
+        subprocess.check_call(["tar", "-xzf", str(tarball), "-C", str(workdir)])
+        n_wavs = count_sin_wavs(workdir)
+        print(f"[2]   {n_wavs} sin_*.wav found after extract")
+    else:
+        print(f"[2] OpenSLR30 audio already present ({n_wavs} sin_*.wav)")
+
+    sinhala_src, wav_dir = normalize_openslr30_corpus(workdir)
+    lines_path = sinhala_src / "si_lk.lines.txt"
+    if not lines_path.exists():
+        print("[2] downloading OpenSLR30 manifest si_lk.lines.txt ...")
+        sys.stdout.flush()
+        subprocess.check_call([
+            "curl", "-L", "-o", str(lines_path),
+            OPENSLR30_LINES_URL,
+        ])
+    else:
+        print(f"[2] OpenSLR30 manifest already at {lines_path}")
+
+    n_wavs = len(list(wav_dir.glob("sin_*.wav")))
+    if n_wavs < OPENSLR30_MIN_WAVS:
+        raise FileNotFoundError(
+            f"!! expected ~1251 sin_*.wav, found {n_wavs} under {wav_dir}. "
+            f"Tarball: {tarball}"
+        )
+    print(f"[2]   corpus -> {sinhala_src}")
+    print(f"[2]   {n_wavs} wavs under {wav_dir}")
+    return sinhala_src, wav_dir
+
 # Pin the exact stack CosyVoice3 was developed against. This is critical
 # because mismatched versions of conformer / matcha / pyworld will silently
 # break the DiT flow decoder and produce garbled audio at inference.
@@ -229,10 +320,11 @@ print(f"[1] torch={torch.__version__}  cuda={torch.cuda.is_available()}  "
 # =============================================================================
 # We pull:
 #   (a) Fun-CosyVoice3-0.5B-2512 from Hugging Face (~12 GB on disk)
-#   (b) OpenSLR30 Sinhala TTS from openslr.org/30 (si_lk.tar.gz, ~700 MB)
+#   (b) OpenSLR30 Sinhala TTS from openslr.org/30:
+#       si_lk.tar.gz (audio) + si_lk.lines.txt (transcripts, separate download)
 #
 # Dataset: Google-collected multi-speaker Sinhala corpus (SLR30, CC BY-SA 4.0).
-# Manifest: si_lk/si_lk.lines.txt + si_lk/wav/*.wav
+# Layout: si_lk/si_lk.lines.txt + si_lk/wav/*.wav
 
 PRETRAIN_DIR = WORKDIR / "pretrained_models" / "Fun-CosyVoice3-0.5B-2512"
 PRETRAIN_DIR.parent.mkdir(parents=True, exist_ok=True)
@@ -253,32 +345,7 @@ else:
     print(f"[2] pretrained model already at {PRETRAIN_DIR}")
 
 # OpenSLR30 Sinhala TTS (openslr.org/30)
-SINHALA_SRC = WORKDIR / "si_lk"
-if SINHALA_SRC.exists() and (SINHALA_SRC / "si_lk.lines.txt").exists():
-    print(f"[2] using extracted OpenSLR30 corpus: {SINHALA_SRC}")
-else:
-    print("[2] downloading OpenSLR30 from openslr.org/30 (~700 MB) ...")
-    tarball = WORKDIR / "si_lk.tar.gz"
-    if not tarball.exists():
-        subprocess.check_call([
-            "curl", "-L", "-o", str(tarball),
-            "https://www.openslr.org/resources/30/si_lk.tar.gz",
-        ])
-    if not SINHALA_SRC.exists():
-        subprocess.check_call(["tar", "-xzf", str(tarball), "-C", str(WORKDIR)])
-    if not (SINHALA_SRC / "si_lk.lines.txt").exists():
-        candidates = list(WORKDIR.rglob("si_lk.lines.txt"))
-        if candidates:
-            SINHALA_SRC = candidates[0].parent
-        else:
-            raise FileNotFoundError(
-                f"!! si_lk.lines.txt not found after extracting {tarball}"
-            )
-    print(f"[2]   extracted -> {SINHALA_SRC}")
-
-wav_dir = SINHALA_SRC / "wav"
-n_wavs = len(list(wav_dir.glob("*.wav"))) if wav_dir.exists() else 0
-print(f"[2]   {n_wavs} wavs under {SINHALA_SRC}")
+SINHALA_SRC, _wav_dir = ensure_openslr30_corpus(WORKDIR)
 
 
 # =============================================================================

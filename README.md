@@ -37,9 +37,10 @@ Training uses the official [OpenSLR SLR30](https://openslr.org/30/) Sinhala mult
 ```bash
 curl -L -o si_lk.tar.gz https://www.openslr.org/resources/30/si_lk.tar.gz
 tar -xzf si_lk.tar.gz
+curl -L -o si_lk/si_lk.lines.txt https://openslr.trmal.net/resources/30/si_lk.lines.txt
 ```
 
-Then point `--src_dir` at the extracted `si_lk/` folder.
+The transcript manifest (`si_lk.lines.txt`) is **not** included in the tarball — download it separately as shown above. Then point `--src_dir` at the extracted `si_lk/` folder.
 
 ## Local run
 
