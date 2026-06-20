@@ -70,6 +70,7 @@ _REPO_SCRIPTS = (
 )
 _REPO_STUBS = (
     "stubs/whisper/__init__.py",
+    "stubs/whisper/tokenizer.py",
 )
 _REPO_CONFIGS = (
     "cosyvoice3_sinhala_sft.yaml",
@@ -103,6 +104,50 @@ def stage_repo_file(name: str, dest: Path) -> Path:
     return dest
 
 
+def patch_constantlr_scheduler_conf(cfg_path: Path) -> None:
+    """Make constantlr + DeepSpeed safe: CosyVoice ConstantLR accepts no kwargs."""
+    import re
+
+    text = cfg_path.read_text(encoding="utf-8")
+    if "constantlr" not in text:
+        return
+    text = re.sub(r"^[ \t]*warmup_steps:.*(?:\n|$)", "", text, flags=re.M)
+    text = re.sub(
+        r"^([ \t]*scheduler_conf:\s*)\n"
+        r"(?=[ \t]*(?:max_epoch|grad_clip|accum_grad|log_interval|save_per_step):)",
+        r"\1 {}\n",
+        text,
+        flags=re.M,
+    )
+    cfg_path.write_text(text, encoding="utf-8")
+
+
+def patch_cosyvoice_pytorch_compat(repo_root: Path) -> None:
+    """Fix cosyvoice_join on PyTorch 2.x (ProcessGroup.options removed) and skip on 1 GPU."""
+    path = repo_root / "cosyvoice" / "utils" / "train_utils.py"
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    changed = False
+    if "group_join.options._timeout" in text:
+        text = text.replace(
+            "group_join.options._timeout",
+            "(getattr(getattr(group_join, 'options', None), '_timeout', None) "
+            "or datetime.timedelta(seconds=int(os.environ.get('COSYVOICE_JOIN_TIMEOUT', '60'))))",
+        )
+        changed = True
+    join_block = 'rank = int(os.environ.get(\'RANK\', 0))'
+    if join_block in text and "if world_size <= 1:" not in text.split("def cosyvoice_join", 1)[1].split("def batch_forward", 1)[0]:
+        text = text.replace(
+            join_block + '\n\n    if info_dict["batch_idx"]',
+            join_block + "\n\n    if world_size <= 1:\n        return False\n\n    if info_dict[\"batch_idx\"]",
+            1,
+        )
+        changed = True
+    if changed:
+        path.write_text(text, encoding="utf-8")
+
+
 def ensure_repo_layout() -> None:
     """Stage all SinhalaTTS helper scripts and configs under WORKDIR."""
     for name in _REPO_SCRIPTS:
@@ -119,14 +164,18 @@ def bootstrap_whisper_stub() -> None:
     SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
     (STUBS_DIR / "whisper").mkdir(parents=True, exist_ok=True)
     mel_dest = SCRIPTS_DIR / "whisper_mel.py"
-    stub_dest = STUBS_DIR / "whisper" / "__init__.py"
+    stub_init = STUBS_DIR / "whisper" / "__init__.py"
+    stub_tok = STUBS_DIR / "whisper" / "tokenizer.py"
     if not mel_dest.exists():
         stage_repo_file("whisper_mel.py", mel_dest)
-    if not stub_dest.exists():
-        try:
-            stage_repo_file("stubs/whisper/__init__.py", stub_dest)
-        except FileNotFoundError:
-            stub_dest.write_text(
+    for repo_name, dest in (
+        ("stubs/whisper/__init__.py", stub_init),
+        ("stubs/whisper/tokenizer.py", stub_tok),
+    ):
+        if find_repo_file(repo_name) is not None:
+            stage_repo_file(repo_name, dest)
+        elif not dest.exists() and repo_name.endswith("__init__.py"):
+            stub_init.write_text(
                 "from whisper_mel import log_mel_spectrogram\n"
                 '__all__ = ["log_mel_spectrogram"]\n',
                 encoding="utf-8",
@@ -252,6 +301,7 @@ REQS = [
     "modelscope==1.20.0",
     "networkx==3.1",
     "numpy==1.26.4",
+    "pandas==2.2.2",
     "omegaconf==2.3.0",
     "onnx==1.16.0",
     "onnxruntime-gpu==1.18.0",
@@ -265,13 +315,20 @@ REQS = [
     "soundfile==0.12.1",
     "tensorboard==2.14.0",
     "transformers==4.51.3",
+    "tiktoken",
     "x-transformers==2.11.24",
     "wetext==0.0.4",
+    "wget==3.2",  # Matcha-TTS (feat_extractor in cosyvoice3 yaml)
     "deepspeed==0.15.1",
 ]
 print(f"[1] installing {len(REQS)} packages (this can take ~3 min) ...")
 t0 = time.time()
 subprocess.check_call([PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir"] + REQS)
+# Kaggle ships pandas built against a different numpy; re-pin both together.
+subprocess.check_call([
+    PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir", "--force-reinstall",
+    "numpy==1.26.4", "pandas==2.2.2",
+])
 print(f"[1]   done in {time.time()-t0:.1f}s")
 
 try:
@@ -281,7 +338,9 @@ except FileNotFoundError as exc:
 
 whisper_stub_paths()
 import whisper as _whisper_check  # noqa: E402
+from whisper.tokenizer import Tokenizer as _WhisperTokenizer  # noqa: E402
 print(f"[1] whisper stub ok (log_mel from {_whisper_check.log_mel_spectrogram.__module__})")
+print(f"[1] whisper.tokenizer.Tokenizer ok ({_WhisperTokenizer.__module__})")
 
 # Clone CosyVoice (shallow clone keeps it fast)
 if not (WORKDIR / "CosyVoice").exists():
@@ -448,17 +507,25 @@ print(f"[5]   wrote {DATA_OUT}/train.data.list and dev.data.list")
 
 print("[6] pre-training data sanity check ...")
 import pyarrow.parquet as pq
+
 parquet_files = sorted((DATA_OUT / "train/parquet").glob("parquet_*.parquet"))
 if not parquet_files:
     raise FileNotFoundError(f"no parquet shards in {DATA_OUT / 'train/parquet'}")
 sample_pq = parquet_files[0]
-df = pq.read_table(sample_pq).to_pandas()
-print(f"[6]   parquet {sample_pq.name} -> {len(df)} utts, "
-      f"audio bytes: {len(df.iloc[0]['audio_data'])}")
-print(f"[6]   sample text: {df.iloc[0]['text']!r}")
-print(f"[6]   sample spk:  {df.iloc[0]['spk']}")
-print(f"[6]   sample utt_embedding len: {len(df.iloc[0]['utt_embedding'])}")
-print(f"[6]   sample speech_token len:  {len(df.iloc[0]['speech_token'])}")
+table = pq.read_table(sample_pq)
+row = table.slice(0, 1)
+audio = row.column("audio_data")[0].as_py()
+text = row.column("text")[0].as_py()
+spk = row.column("spk")[0].as_py()
+utt_emb = row.column("utt_embedding")[0].as_py()
+speech_tok = row.column("speech_token")[0].as_py()
+
+print(f"[6]   parquet {sample_pq.name} -> {table.num_rows} utts, "
+      f"audio bytes: {len(audio)}")
+print(f"[6]   sample text: {text!r}")
+print(f"[6]   sample spk:  {spk}")
+print(f"[6]   sample utt_embedding len: {len(utt_emb)}")
+print(f"[6]   sample speech_token len:  {len(speech_tok)}")
 
 # Free memory before training
 import gc
@@ -479,20 +546,35 @@ print("[6]   ok!")
 # Expected time on T4: ~4-5 hours for 30 epochs over ~1.5k utts.
 
 ensure_repo_layout()
+bootstrap_whisper_stub()
 
 TARGET_CONFIG = WORKDIR / "CosyVoice" / "examples" / "libritts" / "cosyvoice3" / "conf" / "cosyvoice3_sinhala_sft.yaml"
 TARGET_DS = WORKDIR / "CosyVoice" / "examples" / "libritts" / "cosyvoice3" / "conf" / "ds_stage2.json"
 TARGET_CONFIG.parent.mkdir(parents=True, exist_ok=True)
 shutil.copy(CONFIGS_DIR / "cosyvoice3_sinhala_sft.yaml", TARGET_CONFIG)
 shutil.copy(CONFIGS_DIR / "ds_stage2.json", TARGET_DS)
+patch_constantlr_scheduler_conf(TARGET_CONFIG)
+if "warmup_steps" in TARGET_CONFIG.read_text(encoding="utf-8"):
+    raise RuntimeError(
+        "[7] scheduler_conf still has warmup_steps after patch — "
+        "check cosyvoice3_sinhala_sft.yaml"
+    )
+print("[7] scheduler_conf patched for constantlr + DeepSpeed")
+patch_cosyvoice_pytorch_compat(WORKDIR / "CosyVoice")
+print("[7] CosyVoice train_utils patched for PyTorch 2.x / single GPU")
 
 launcher_src = SCRIPTS_DIR / "train_sinhala_sft.sh"
 
 # Run training
 print("[7] launching LLM training ...")
+_repo = WORKDIR / "CosyVoice"
+_matcha = _repo / "third_party" / "Matcha-TTS"
+_py_path = os.pathsep.join([
+    str(_repo), str(_matcha), str(SCRIPTS_DIR), str(STUBS_DIR),
+])
 env = os.environ.copy()
 env.update({
-    "REPO_ROOT": str(WORKDIR / "CosyVoice"),
+    "REPO_ROOT": str(_repo),
     "PRETRAINED_DIR": str(PRETRAIN_DIR),
     "DATA_DIR": str(DATA_OUT),
     "EXP_DIR": str(WORKDIR / "exp" / "cosyvoice3"),
@@ -501,6 +583,7 @@ env.update({
     "DS_CONFIG": str(TARGET_DS),
     "SCRIPTS_DIR": str(SCRIPTS_DIR),
     "STUBS_DIR": str(STUBS_DIR),
+    "PYTHONPATH": _py_path,
     "NUM_WORKERS": "2",
     "PREFETCH": "100",
     "SAVE_EVERY": "500",

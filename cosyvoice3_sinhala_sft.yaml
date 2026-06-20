@@ -9,9 +9,8 @@
 #              forgetting of the 9-language CosyVoice3 pretraining. With lr=1e-3
 #              the model will start generating garbled Sinhala after a few
 #              hundred steps.
-#   * scheduler constantlr (instead of warmuplr). The SFT corpus is tiny
-#              (~1k-2k utts) so warmup is unnecessary and constantlr is what
-#              every published CosyVoice3 SFT recipe uses.
+#   * scheduler constantlr (instead of warmuplr). Omit scheduler_conf — CosyVoice's
+#              ConstantLR takes no kwargs; DeepSpeed would pass warmup_steps otherwise.
 #   * max_frames_in_batch 1500 (down from 2000). T4 has 16 GB; 2000 frames
 #              pushes us into OOM territory when training LLM+Flow together.
 #   * max_length 6000 -> 4500. Sinhala transcriptions are short; 4500 frames
@@ -237,8 +236,9 @@ train_conf:
     optim_conf:
         lr: 1.0e-5            # SFT-safe LR (1e-3 is for from-scratch only)
     scheduler: constantlr
-    scheduler_conf:
-        warmup_steps: 0
+    # Empty dict required: DeepSpeed passes **scheduler_conf to ConstantLR, which
+    # only accepts (optimizer). Do not add warmup_steps here.
+    scheduler_conf: {}
     max_epoch: 30
     grad_clip: 5
     accum_grad: 4            # effective batch ~4x larger; ds_stage2.json keeps gradient_accumulation_steps=1

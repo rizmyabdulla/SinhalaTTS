@@ -29,9 +29,10 @@ set -euo pipefail
 # --- env --------------------------------------------------------------------
 SCRIPTS_DIR=${SCRIPTS_DIR:-"/kaggle/working/scripts"}
 STUBS_DIR=${STUBS_DIR:-"/kaggle/working/stubs"}
-export PYTHONPATH="${SCRIPTS_DIR}:${STUBS_DIR}:${PYTHONPATH:-}"
-
 REPO_ROOT=${REPO_ROOT:-"/kaggle/working/CosyVoice"}
+MATCHA_ROOT="${REPO_ROOT}/third_party/Matcha-TTS"
+export PYTHONPATH="${REPO_ROOT}:${MATCHA_ROOT}:${SCRIPTS_DIR}:${STUBS_DIR}:${PYTHONPATH:-}"
+
 PRETRAINED_DIR=${PRETRAINED_DIR:-"/kaggle/working/pretrained_models/Fun-CosyVoice3-0.5B-2512"}
 DATA_DIR=${DATA_DIR:-"/kaggle/working/sinhala_data"}
 EXP_DIR=${EXP_DIR:-"${REPO_ROOT}/exp/cosyvoice3"}
@@ -88,7 +89,46 @@ text = cfg.read_text(encoding="utf-8")
 text = re.sub(r"(save_per_step:\s*)\d+", rf"\g<1>{save_every}", text)
 text = re.sub(r"(max_epoch:\s*)\d+", rf"\g<1>{max_epoch}", text)
 text = re.sub(r"(log_interval:\s*)\d+", rf"\g<1>{log_interval}", text)
+if "constantlr" in text:
+    text = re.sub(r"^[ \t]*warmup_steps:.*(?:\n|$)", "", text, flags=re.M)
+    text = re.sub(
+        r"^([ \t]*scheduler_conf:\s*)\n"
+        r"(?=[ \t]*(?:max_epoch|grad_clip|accum_grad|log_interval|save_per_step):)",
+        r"\1 {}\n",
+        text,
+        flags=re.M,
+    )
 cfg.write_text(text, encoding="utf-8")
+PY
+
+# PyTorch 2.x: ProcessGroup.options removed; single-GPU Kaggle skips monitored_barrier
+python - "${REPO_ROOT}" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]) / "cosyvoice" / "utils" / "train_utils.py"
+if not path.exists():
+    sys.exit(0)
+text = path.read_text(encoding="utf-8")
+changed = False
+if "group_join.options._timeout" in text:
+    text = text.replace(
+        "group_join.options._timeout",
+        "(getattr(getattr(group_join, 'options', None), '_timeout', None) "
+        "or __import__('datetime').timedelta(seconds=int(os.environ.get('COSYVOICE_JOIN_TIMEOUT', '60'))))",
+    )
+    changed = True
+anchor = "rank = int(os.environ.get('RANK', 0))"
+if anchor in text and "if world_size <= 1:" not in text.split("def cosyvoice_join", 1)[1].split("def batch_forward", 1)[0]:
+    text = text.replace(
+        anchor + '\n\n    if info_dict["batch_idx"]',
+        anchor + "\n\n    if world_size <= 1:\n        return False\n\n    if info_dict[\"batch_idx\"]",
+        1,
+    )
+    changed = True
+if changed:
+    path.write_text(text, encoding="utf-8")
 PY
 
 # --- launch -----------------------------------------------------------------
