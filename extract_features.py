@@ -20,7 +20,8 @@ A100s but on a T4 the ONNX+CUDA contention slows training by ~30%.
 For SFT (where data is static), pre-extraction is strictly better.
 
 campplus.onnx runs on CPU (it's small, ~30 MB, and CPU is fine for
-batch=1 inference). speech_tokenizer_v3.onnx runs on GPU.
+batch=1 inference). speech_tokenizer_v3.onnx prefers prefer GPU but CPU
+works on Kaggle when onnxruntime-gpu lacks matching CUDA libs.
 """
 
 from __future__ import annotations
@@ -56,6 +57,15 @@ def make_session(path: str, providers: List[str]) -> ort.InferenceSession:
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     opts.intra_op_num_threads = 1
     return ort.InferenceSession(path, sess_options=opts, providers=providers)
+
+
+def resolve_ort_providers(device: str) -> List[str]:
+    """Pick ONNX Runtime providers; fall back to CPU when CUDA libs mismatch."""
+    if device == "cpu":
+        return ["CPUExecutionProvider"]
+    if device == "cuda" and torch.cuda.is_available():
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    return ["CPUExecutionProvider"]
 
 
 # -----------------------------------------------------------------------------
@@ -123,15 +133,14 @@ class SpeechTokenizerV3:
     shape (B, 128, T). Token vocabulary is 6561 (81^2, 2-D RVQ).
     """
     def __init__(self, onnx_path: str, device: str = "cuda"):
-        providers = (["CUDAExecutionProvider"]
-                     if device == "cuda" and torch.cuda.is_available()
-                     else ["CPUExecutionProvider"])
+        providers = resolve_ort_providers(device)
         self.session = make_session(onnx_path, providers=providers)
+        self.active_provider = self.session.get_providers()[0]
         self.device = device
         self.target_sr = 16000
 
     @torch.inference_mode()
-    def encode(self, wav_path: str) -> torch.Tensor:
+    def encode(self, wav_path: str) -> tuple[torch.Tensor, int]:
         wav, sr = torchaudio.load(wav_path)
         if wav.shape[0] > 1:
             wav = wav.mean(dim=0, keepdim=True)
@@ -145,14 +154,14 @@ class SpeechTokenizerV3:
         speech = wav if wav.dim() == 2 else wav.unsqueeze(0)
         feat = whisper_log_mel_spectrogram(speech, n_mels=128)
         feat_len = np.array([feat.shape[2]], dtype=np.int32)
-        out, out_lens = self.session.run(
-            None,
-            {
-                self.session.get_inputs()[0].name: feat.cpu().numpy(),
-                self.session.get_inputs()[1].name: feat_len,
-            },
-        )
-        return torch.tensor(out[0], dtype=torch.int32), int(out_lens[0][0])
+        inputs = {
+            self.session.get_inputs()[0].name: feat.cpu().numpy(),
+        }
+        if len(self.session.get_inputs()) > 1:
+            inputs[self.session.get_inputs()[1].name] = feat_len
+        outputs = self.session.run(None, inputs)
+        tokens = np.asarray(outputs[0], dtype=np.int32).reshape(-1)
+        return torch.from_numpy(tokens), int(tokens.size)
 
 
 # -----------------------------------------------------------------------------
@@ -206,8 +215,9 @@ def main():
     # Init extractors
     print(f"  loading campplus ONNX on CPU")
     embedder = CampPlusEmbedder(args.campplus_onnx)
-    print(f"  loading speech_tokenizer ONNX on {args.device}")
+    print(f"  loading speech_tokenizer ONNX (requested: {args.device})")
     tokenizer = SpeechTokenizerV3(args.speech_tokenizer_onnx, device=args.device)
+    print(f"  speech_tokenizer active provider: {tokenizer.active_provider}")
 
     pending: List[str] = []
     spk2utt_acc: Dict[str, List[str]] = {}
@@ -233,7 +243,7 @@ def main():
             print(f"\n  ! {utt}: {e}", file=sys.stderr)
             continue
         utt2emb[utt] = emb
-        utt2tok[utt] = tok[:tok_len] if tok.dim() == 1 else tok[0, :tok_len]
+        utt2tok[utt] = tok[:tok_len]
         spk2utt_acc.setdefault(spk, []).append(utt)
 
         # Periodically flush to disk

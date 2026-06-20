@@ -402,7 +402,7 @@ for split in ("train", "dev"):
         "--data_dir", str(out_dir),
         "--campplus_onnx", str(CAMPPLUS),
         "--speech_tokenizer_onnx", str(SPEECH_TOK),
-        "--device", "cuda",
+        "--device", "cpu",  # onnxruntime-gpu on Kaggle lacks libcublasLt.so.11
         "--save_every", "200",
     ])
     print(f"[4]   {split} features done in {time.time()-t0:.1f}s")
