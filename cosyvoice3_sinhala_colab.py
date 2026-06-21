@@ -67,7 +67,7 @@ REQS = [
     "HyperPyYAML==1.2.3", "conformer==0.3.2", "diffusers==0.29.0", "hydra-core==1.3.2",
     "inflect==7.3.1", "librosa==0.10.2", "lightning==2.2.4", "matplotlib==3.7.5",
     "modelscope==1.20.0", "networkx==3.1", "numpy==1.26.4", "pandas==2.2.2",
-    "omegaconf==2.3.0", "onnx==1.16.0", "onnxruntime-gpu==1.18.0", "protobuf==4.25",
+    "omegaconf==2.3.0", "onnx==1.16.0", "onnxruntime-gpu==1.18.0",
     "pyarrow==18.1.0", "pydantic==2.7.0", "pyworld==0.3.4", "rich==13.7.1",
     "soundfile==0.12.1", "tensorboard==2.14.0", "transformers==4.51.3", "tiktoken",
     "x-transformers==2.11.24", "wetext==0.0.4", "wget==3.2", "deepspeed==0.15.1",
@@ -169,6 +169,84 @@ def bootstrap_whisper_stub() -> None:
             sys.path.insert(0, path)
 
 
+_PROTOBUF_VERIFY = (
+    "import numpy as np\n"
+    "assert np.__version__.startswith('1.26.'), f'numpy {np.__version__} (need 1.26.x)'\n"
+    "import google.protobuf as pb\n"
+    "from google.protobuf import runtime_version  # noqa: F401\n"
+    "import transformers.models.qwen2.modeling_qwen2  # noqa: F401\n"
+    "print(pb.__version__)"
+)
+# runtime_version exists only in protobuf >= 5.24 (not 4.25.x).
+_PROTOBUF_SPECS = ("protobuf==5.28.3", "protobuf==6.30.2")
+
+
+def _ml_import_env() -> dict[str, str]:
+    """Keep transformers off TensorFlow/JAX (Colab preinstalls both)."""
+    env = os.environ.copy()
+    env.update({"USE_TF": "0", "USE_FLAX": "0", "USE_TORCH": "1"})
+    return env
+
+
+def _pin_numpy_stack() -> None:
+    """Protobuf 5.x pip often upgrades numpy to 2.x; our stack needs 1.26.x wheels."""
+    subprocess.check_call([
+        PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir", "--force-reinstall",
+        "numpy==1.26.4",
+    ])
+    subprocess.check_call([
+        PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir", "--force-reinstall",
+        "pandas==2.2.2", "pyarrow==18.1.0", "matplotlib==3.7.5",
+    ])
+
+
+def repair_protobuf() -> str:
+    """Install protobuf 5.x+ for transformers/qwen2 (needs runtime_version).
+
+    Colab often ships protobuf 3.x/4.x and/or the PyPI ``google`` metapackage.
+    Verify in a subprocess — the notebook kernel may cache stale google.protobuf.
+    """
+    for pkg in ("google", "protobuf"):
+        subprocess.run(
+            [PYTHON, "-m", "pip", "uninstall", "-y", pkg],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    last_err = ""
+    verify_env = _ml_import_env()
+    for spec in _PROTOBUF_SPECS:
+        subprocess.check_call([
+            PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir", spec,
+        ])
+        _pin_numpy_stack()
+        r = subprocess.run(
+            [PYTHON, "-c", _PROTOBUF_VERIFY],
+            capture_output=True, text=True, env=verify_env,
+        )
+        if r.returncode == 0:
+            lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+            return lines[-1]
+        last_err = (r.stderr or r.stdout or "").strip()
+        subprocess.run(
+            [PYTHON, "-m", "pip", "uninstall", "-y", "protobuf"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    raise RuntimeError(f"protobuf repair failed:\n{last_err}")
+
+
+def verify_protobuf_subprocess() -> str:
+    verify_env = _ml_import_env()
+    try:
+        out = subprocess.check_output(
+            [PYTHON, "-c", _PROTOBUF_VERIFY],
+            text=True, env=verify_env,
+        )
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        return lines[-1]
+    except subprocess.CalledProcessError:
+        return repair_protobuf()
+
+
 def patch_constantlr_scheduler_conf(cfg: Path) -> None:
     text = cfg.read_text(encoding="utf-8")
     if "constantlr" not in text:
@@ -265,7 +343,7 @@ def ensure_openslr30_corpus(root: Path) -> tuple[Path, Path]:
 
 
 def build_train_env(repo: Path, pretrain: Path, data: Path, config: Path, ds: Path) -> dict[str, str]:
-    env = os.environ.copy()
+    env = _ml_import_env()
     env.update({
         "REPO_ROOT": str(repo),
         "PRETRAINED_DIR": str(pretrain),
@@ -320,14 +398,8 @@ _mount_drive_if_needed()
 print(f"[1] Python {sys.version.split()[0]} | installing deps ...")
 t0 = time.time()
 subprocess.check_call([PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir"] + REQS)
-subprocess.check_call([
-    PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir", "--force-reinstall",
-    "numpy==1.26.4",
-])
-subprocess.check_call([
-    PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir", "--force-reinstall",
-    "pandas==2.2.2", "pyarrow==18.1.0",
-])
+_pin_numpy_stack()
+print(f"[1] protobuf {repair_protobuf()} (subprocess ok; restart runtime if in-kernel import fails)")
 print(f"[1] pip {time.time() - t0:.1f}s")
 
 ensure_repo_layout()
@@ -466,6 +538,7 @@ yaml_cfg, ds_cfg = setup_training_configs(COSYVOICE_DIR)
 launcher = SCRIPTS_DIR / "train_sinhala_sft.sh"
 train_env = build_train_env(COSYVOICE_DIR, PRETRAIN_DIR, DATA_OUT, yaml_cfg, ds_cfg)
 
+print(f"[7] protobuf {verify_protobuf_subprocess()} ok")
 print("[7] LLM training ...")
 run_train(launcher, "llm", train_env)
 print("[7] done")

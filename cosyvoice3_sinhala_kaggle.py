@@ -104,6 +104,64 @@ def stage_repo_file(name: str, dest: Path) -> Path:
     return dest
 
 
+_PROTOBUF_VERIFY = (
+    "import numpy as np\n"
+    "assert np.__version__.startswith('1.26.'), f'numpy {np.__version__} (need 1.26.x)'\n"
+    "import google.protobuf as pb\n"
+    "from google.protobuf import runtime_version  # noqa: F401\n"
+    "import transformers.models.qwen2.modeling_qwen2  # noqa: F401\n"
+    "print(pb.__version__)"
+)
+_PROTOBUF_SPECS = ("protobuf==5.28.3", "protobuf==6.30.2")
+
+
+def _ml_import_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.update({"USE_TF": "0", "USE_FLAX": "0", "USE_TORCH": "1"})
+    return env
+
+
+def _pin_numpy_stack() -> None:
+    subprocess.check_call([
+        PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir", "--force-reinstall",
+        "numpy==1.26.4",
+    ])
+    subprocess.check_call([
+        PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir", "--force-reinstall",
+        "pandas==2.2.2", "pyarrow==18.1.0", "matplotlib==3.7.5",
+    ])
+
+
+def repair_protobuf() -> str:
+    """Install protobuf 5.x+ for transformers/qwen2 (runtime_version)."""
+    for pkg in ("google", "protobuf"):
+        subprocess.run(
+            [PYTHON, "-m", "pip", "uninstall", "-y", pkg],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    last_err = ""
+    verify_env = _ml_import_env()
+    for spec in _PROTOBUF_SPECS:
+        subprocess.check_call([
+            PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir", spec,
+        ])
+        _pin_numpy_stack()
+        r = subprocess.run(
+            [PYTHON, "-c", _PROTOBUF_VERIFY],
+            capture_output=True, text=True, env=verify_env,
+        )
+        if r.returncode == 0:
+            lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+            return lines[-1]
+        last_err = (r.stderr or r.stdout or "").strip()
+        subprocess.run(
+            [PYTHON, "-m", "pip", "uninstall", "-y", "protobuf"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    raise RuntimeError(f"protobuf repair failed:\n{last_err}")
+
+
 def patch_constantlr_scheduler_conf(cfg_path: Path) -> None:
     """Make constantlr + DeepSpeed safe: CosyVoice ConstantLR accepts no kwargs."""
     import re
@@ -306,8 +364,6 @@ REQS = [
     "onnx==1.16.0",
     "onnxruntime-gpu==1.18.0",
     # openai-whisper omitted: fails to build on Kaggle Python 3.12.
-    # whisper_mel.py + stubs/whisper/ provide whisper.log_mel_spectrogram instead.
-    "protobuf==4.25",
     "pyarrow==18.1.0",
     "pydantic==2.7.0",
     "pyworld==0.3.4",
@@ -324,15 +380,8 @@ REQS = [
 print(f"[1] installing {len(REQS)} packages (this can take ~3 min) ...")
 t0 = time.time()
 subprocess.check_call([PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir"] + REQS)
-# Kaggle ships pandas built against a different numpy; pin numpy first, then rebuild dependents.
-subprocess.check_call([
-    PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir", "--force-reinstall",
-    "numpy==1.26.4",
-])
-subprocess.check_call([
-    PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir", "--force-reinstall",
-    "pandas==2.2.2", "pyarrow==18.1.0",
-])
+_pin_numpy_stack()
+print(f"[1] protobuf {repair_protobuf()} (subprocess ok)")
 print(f"[1]   done in {time.time()-t0:.1f}s")
 
 try:
@@ -578,7 +627,7 @@ _matcha = _repo / "third_party" / "Matcha-TTS"
 _py_path = os.pathsep.join([
     str(_repo), str(_matcha), str(SCRIPTS_DIR), str(STUBS_DIR),
 ])
-env = os.environ.copy()
+env = _ml_import_env()
 env.update({
     "REPO_ROOT": str(_repo),
     "PRETRAINED_DIR": str(PRETRAIN_DIR),

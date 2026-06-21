@@ -26,17 +26,27 @@
 
 set -euo pipefail
 
-# --- env --------------------------------------------------------------------
-SCRIPTS_DIR=${SCRIPTS_DIR:-"/kaggle/working/scripts"}
-STUBS_DIR=${STUBS_DIR:-"/kaggle/working/stubs"}
-REPO_ROOT=${REPO_ROOT:-"/kaggle/working/CosyVoice"}
+# --- env (auto-detect Colab /content vs Kaggle /kaggle/working) -------------
+if [ -z "${WORK_ROOT:-}" ]; then
+    if [ -d "/content/CosyVoice/cosyvoice" ]; then
+        WORK_ROOT="/content"
+    elif [ -d "/kaggle/working/CosyVoice/cosyvoice" ]; then
+        WORK_ROOT="/kaggle/working"
+    else
+        WORK_ROOT="/content"
+    fi
+fi
+
+SCRIPTS_DIR=${SCRIPTS_DIR:-"${WORK_ROOT}/scripts"}
+STUBS_DIR=${STUBS_DIR:-"${WORK_ROOT}/stubs"}
+REPO_ROOT=${REPO_ROOT:-"${WORK_ROOT}/CosyVoice"}
 MATCHA_ROOT="${REPO_ROOT}/third_party/Matcha-TTS"
 export PYTHONPATH="${REPO_ROOT}:${MATCHA_ROOT}:${SCRIPTS_DIR}:${STUBS_DIR}:${PYTHONPATH:-}"
 
-PRETRAINED_DIR=${PRETRAINED_DIR:-"/kaggle/working/pretrained_models/Fun-CosyVoice3-0.5B-2512"}
-DATA_DIR=${DATA_DIR:-"/kaggle/working/sinhala_data"}
-EXP_DIR=${EXP_DIR:-"${REPO_ROOT}/exp/cosyvoice3"}
-TB_DIR=${TB_DIR:-"${REPO_ROOT}/tensorboard/cosyvoice3"}
+PRETRAINED_DIR=${PRETRAINED_DIR:-"${WORK_ROOT}/pretrained_models/Fun-CosyVoice3-0.5B-2512"}
+DATA_DIR=${DATA_DIR:-"${WORK_ROOT}/sinhala_data"}
+EXP_DIR=${EXP_DIR:-"${WORK_ROOT}/exp/cosyvoice3"}
+TB_DIR=${TB_DIR:-"${WORK_ROOT}/tensorboard/cosyvoice3"}
 CONFIG=${CONFIG:-"${REPO_ROOT}/examples/libritts/cosyvoice3/conf/cosyvoice3_sinhala_sft.yaml"}
 DS_CONFIG=${DS_CONFIG:-"${REPO_ROOT}/examples/libritts/cosyvoice3/conf/ds_stage2.json"}
 NUM_WORKERS=${NUM_WORKERS:-2}
