@@ -324,10 +324,14 @@ REQS = [
 print(f"[1] installing {len(REQS)} packages (this can take ~3 min) ...")
 t0 = time.time()
 subprocess.check_call([PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir"] + REQS)
-# Kaggle ships pandas built against a different numpy; re-pin both together.
+# Kaggle ships pandas built against a different numpy; pin numpy first, then rebuild dependents.
 subprocess.check_call([
     PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir", "--force-reinstall",
-    "numpy==1.26.4", "pandas==2.2.2",
+    "numpy==1.26.4",
+])
+subprocess.check_call([
+    PYTHON, "-m", "pip", "install", "-q", "--no-cache-dir", "--force-reinstall",
+    "pandas==2.2.2", "pyarrow==18.1.0",
 ])
 print(f"[1]   done in {time.time()-t0:.1f}s")
 
@@ -512,7 +516,9 @@ parquet_files = sorted((DATA_OUT / "train/parquet").glob("parquet_*.parquet"))
 if not parquet_files:
     raise FileNotFoundError(f"no parquet shards in {DATA_OUT / 'train/parquet'}")
 sample_pq = parquet_files[0]
-table = pq.read_table(sample_pq)
+# ParquetFile avoids pq.read_table() → pyarrow.dataset → pandas (ABI mismatch).
+with pq.ParquetFile(sample_pq) as pf:
+    table = pf.read(columns=["text", "speech_token", "spk", "utt_embedding", "audio_data"])
 row = table.slice(0, 1)
 audio = row.column("audio_data")[0].as_py()
 text = row.column("text")[0].as_py()
