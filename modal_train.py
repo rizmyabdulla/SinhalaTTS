@@ -123,6 +123,7 @@ _PIP_DEPS = [
     "wget==3.2",
     "deepspeed==0.15.1",
     "huggingface_hub",
+    "hf_transfer",  # required when HF_HUB_ENABLE_HF_TRANSFER=1
 ]
 
 volume = modal.Volume.from_name(MODAL_CONFIG["volume_name"], create_if_missing=True)
