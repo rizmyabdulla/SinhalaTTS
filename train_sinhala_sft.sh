@@ -28,7 +28,9 @@ set -euo pipefail
 
 # --- env (auto-detect Colab /content vs Kaggle /kaggle/working) -------------
 if [ -z "${WORK_ROOT:-}" ]; then
-    if [ -d "/content/CosyVoice/cosyvoice" ]; then
+    if [ -d "/vol/workspace/CosyVoice/cosyvoice" ]; then
+        WORK_ROOT="/vol/workspace"
+    elif [ -d "/content/CosyVoice/cosyvoice" ]; then
         WORK_ROOT="/content"
     elif [ -d "/kaggle/working/CosyVoice/cosyvoice" ]; then
         WORK_ROOT="/kaggle/working"
